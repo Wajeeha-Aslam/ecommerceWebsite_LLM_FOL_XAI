@@ -1,6 +1,10 @@
+import google.generativeai as genai
 import json
 import webbrowser
 from flask import Flask, render_template_string, request
+
+# Configure the Google Generative AI API
+genai.configure(api_key="AIzaSyBrgF20TimM0NULdq_mTIOKZHp2IeK55-I")
 
 # Load the data from JSON
 data_file = "random_customers_products.json"
@@ -9,7 +13,7 @@ with open(data_file, "r") as file:
 
 # Update to match the correct JSON structure
 customers = data["customers"]
-products = data["product"]  # Changed from 'products' to 'product' to match JSON structure
+products = data["product"]  
 
 # Flask App
 app = Flask(__name__)
@@ -17,28 +21,72 @@ app = Flask(__name__)
 # Store liked products per customer
 liked_products = {}
 
-#XAI part
+def apply_first_order_logic(liked_categories, liked_prices, all_products):
+    recommendations = []
+
+    # FOL: Recommend products from liked categories
+    for category in liked_categories:
+        for product in all_products:
+            if product["product_category"] == category and product["product_id"] not in recommendations:
+                recommendations.append({
+                    "product_name": product["product_name"],
+                    "reason": f"Product from liked category: {category}"
+                })
+    # FOL: Recommend products from liked price ranges
+    for price in liked_prices:
+        for product in all_products:
+            if product["price_range"] == price and product["product_id"] not in recommendations:
+                recommendations.append({
+                    "product_name": product["product_name"],
+                    "reason": f"Product from liked price range: {price}"
+                })
+
+    # Return only the top 3 recommendations
+    return recommendations[:3]
+
+
+# Calculate saliency scores
 def calculate_saliency(liked, all_products):
-    # Initialize saliency scores
     saliency_scores = {"category": {}, "price_range": {}}
-    
-    # Get categories and price ranges of liked products
     liked_categories = {product["product_category"] for product in all_products if product["product_id"] in liked}
     liked_prices = {product["price_range"] for product in all_products if product["product_id"] in liked}
-    
-    # Calculate category saliency
+
     for category in liked_categories:
         saliency_scores["category"][category] = sum(
             1 for product in all_products if product["product_category"] == category
         )
-    
-    # Calculate price range saliency
     for price in liked_prices:
         saliency_scores["price_range"][price] = sum(
             1 for product in all_products if product["price_range"] == price
         )
-    
     return saliency_scores
+
+# LLM Recommendation Logic using Google Generative AI
+def get_llm_recommendations(liked_categories, liked_prices):
+    query = f"""
+    Recommend the top 3 products similar to categories {liked_categories} and price ranges {liked_prices}.
+    Provide a short explanation for each recommendation in the format:
+    "Product Name: Explanation".
+    """
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(query)
+        
+        recommendations = []
+        for line in response.text.splitlines():
+            if ":" in line:  # Ensures the format "Product: Reason"
+                product, reason = line.split(":", 1)
+                recommendations.append({
+                    "product_name": product.strip(),
+                    "reason": reason.strip()
+                })
+            if len(recommendations) >= 3:  # Limit to top 3 recommendations
+                break
+        
+        return recommendations
+    except Exception as e:
+        print(f"Error using LLM API: {e}")
+        return []
 
 
 # HTML Templates
@@ -139,53 +187,69 @@ recommend_template = '''
 <body>
     <header>Your Recommendations</header>
     <main>
-        <h2>Based on your liked products, we recommend:</h2>
-        <table border="1" style="margin: 0 auto; border-collapse: collapse; width: 80%;">
-            <tr>
-                <th>LLM Recommendations</th>
-                <th>First Order Logic Recommendations</th>
-            </tr>
-            <tr>
-                <td>
-                    {% for product in llm_recommendations %}
-                        <p>{{ product['product_name'] }} - {{ product['price_range'] }}</p>
-                    {% endfor %}
-                </td>
-                <td>
-                    {% for product in fol_recommendations %}
-                        <p>{{ product['product_name'] }} - {{ product['price_range'] }}</p>
-                    {% endfor %}
-                </td>
-            </tr>
+        <h3>First Order Logic Recommendations</h3>
+        <table border="1">
+            <thead>
+                <tr>
+                    <th>Recommended Product</th>
+                    <th>Reason</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for product in fol_recommendations %}
+                    <tr>
+                        <td>{{ product['product_name'] }}</td>
+                        <td>{{ product['reason'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
         </table>
-        
+
+        <h3>LLM Recommendations</h3>
+        <table border="1">
+            <thead>
+                <tr>
+                    <th>Recommended Product</th>
+                    
+                </tr>
+            </thead>
+            <tbody>
+                {% for product in llm_recommendations %}
+                    <tr>
+                        <td>{{ product['product_name'] }}</td>
+                        <td>{{ product['reason'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
         <h3>Saliency Maps (Feature Importance)</h3>
         <h4>Category Importance</h4>
-       <table border="1" style="margin: 0 auto; border-collapse: collapse;">
-          <tr>
-              <th>Category</th>
-              <th>Importance Score</th>
-         </tr>
-         {% for category, score in saliency_scores["category"].items() %}
-         <tr>
-             <td>{{ category }}</td>
-             <td>{{ score }}</td>
-         </tr>
-         {% endfor %}
-       </table>
+        <table border="1" style="margin: 0 auto; border-collapse: collapse;">
+            <tr>
+                <th>Category</th>
+                <th>Importance Score</th>
+            </tr>
+            {% for category, score in saliency_scores["category"].items() %}
+            <tr>
+                <td>{{ category }}</td>
+                <td>{{ score }}</td>
+            </tr>
+            {% endfor %}
+        </table>
 
         <h4>Price Range Importance</h4>
         <table border="1" style="margin: 0 auto; border-collapse: collapse;">
-         <tr>
-            <th>Price Range</th>
-            <th>Importance Score</th>
-        </tr>
-        {% for price_range, score in saliency_scores["price_range"].items() %}
-        <tr>
-            <td>{{ price_range }}</td>
-            <td>{{ score }}</td>
-        </tr>
-        {% endfor %}
+            <tr>
+                <th>Price Range</th>
+                <th>Importance Score</th>
+            </tr>
+            {% for price_range, score in saliency_scores["price_range"].items() %}
+            <tr>
+                <td>{{ price_range }}</td>
+                <td>{{ score }}</td>
+            </tr>
+            {% endfor %}
         </table>
 
     </main>
@@ -212,19 +276,18 @@ def recommend():
     # Store liked products
     liked_products[customer_id] = liked
 
-    # LLM Recommendations: Products in the same category but not already liked
+    # Extract categories and prices of liked products
     liked_categories = {product["product_category"] for product in products if product["product_id"] in liked}
-    llm_recommendations = [
-        product for product in products
-        if product["product_category"] in liked_categories and product["product_id"] not in liked
-    ][:3]
-
-    # First Order Logic Recommendations: Products with similar price range but not already liked
     liked_prices = {product["price_range"] for product in products if product["product_id"] in liked}
-    fol_recommendations = [
-        product for product in products
-        if product["price_range"] in liked_prices and product["product_id"] not in liked and product["product_id"] not in [p["product_id"] for p in llm_recommendations]
-    ][:3]
+
+    # Generate FOL-based recommendations
+    fol_recommendations = apply_first_order_logic(liked_categories, liked_prices, products)
+
+    # Generate LLM-based recommendations
+    llm_recommendations_text = get_llm_recommendations(liked_categories, liked_prices)
+    llm_recommendations = [
+        {"product_name": rec, "price_range": "N/A", "product_category": "N/A"} for rec in llm_recommendations_text
+    ]
 
     # Calculate saliency scores
     saliency_scores = calculate_saliency(liked, products)
@@ -233,7 +296,7 @@ def recommend():
         recommend_template,
         llm_recommendations=llm_recommendations,
         fol_recommendations=fol_recommendations,
-        saliency_scores=saliency_scores,  # Pass saliency data to the template
+        saliency_scores=saliency_scores
     )
 
 # Run App
